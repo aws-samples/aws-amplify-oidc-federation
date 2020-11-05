@@ -1,0 +1,2 @@
+cognitojwt[sync]
+dynamodb-json

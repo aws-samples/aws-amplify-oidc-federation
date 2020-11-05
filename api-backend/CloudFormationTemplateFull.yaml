@@ -1,0 +1,272 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: An AWS Serverless Specification template describing your function.
+Parameters:
+  Bucket:
+    Type: String
+  DefaultCallLimit:
+    Type: Number
+    Default: 50
+  CognitoCallBackUrl:
+    Type: String
+    Default: http://localhost
+  CognitoLogOutUrl:
+    Type: String
+    Default: http://localhost
+  CognitoDomain:
+    Type: String
+    Default: amplifyblogaws
+  IdpName:
+    Type: String
+    Default: OIDC
+  ClientId:
+    Type: String
+  ClientSecret:
+    Type: String
+  Issuer:
+    Type: String
+  RoleAttribute:
+    Type: String
+  Username:
+    Type: String
+Resources:
+#----------------------------------API-----------------------------------
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      OpenApiVersion: '3.0.1'
+      StageName: Dev
+      EndpointConfiguration:
+        Type: REGIONAL
+      Auth:
+        Authorizers:
+          MyLambdaTokenAuth:
+            FunctionArn:
+              Fn::GetAtt:
+                - LambdaAuthorizer
+                - Arn
+            Identity:
+              Header: Authorization
+              ReauthorizeEvery: 0
+        AddDefaultAuthorizerToCorsPreflight: False
+        DefaultAuthorizer: MyLambdaTokenAuth
+      DefinitionBody:
+        Fn::Transform:
+          Name: "AWS::Include"
+          Parameters:
+            Location: "./api-definition.yaml"
+#--------------------------------Cognito---------------------------------
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AliasAttributes: 
+        - email
+      Schema:
+        - 
+          AttributeDataType: String
+          Mutable: true
+          Name: department
+          StringAttributeConstraints:
+            MaxLength: "2048"
+            MinLength: "1"
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: CognitoUserPoolIdP
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      SupportedIdentityProviders:
+        - !Ref IdpName
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - aws.cognito.signin.user.admin
+        - profile
+      CallbackURLs:
+        - !Ref CognitoCallBackUrl
+      LogoutURLs:
+        - !Ref CognitoLogOutUrl
+      ExplicitAuthFlows:
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      ReadAttributes:
+        - "address"
+        - "birthdate"
+        - !Sub "custom:${RoleAttribute}"
+        - "email"
+        - "email_verified"
+        - "family_name"
+        - "gender"
+        - "given_name"
+        - "locale"
+        - "middle_name"
+        - "name"
+        - "nickname"
+        - "phone_number"
+        - "phone_number_verified"
+        - "picture"
+        - "preferred_username"
+        - "profile"
+        - "updated_at"
+        - "website"
+        - "zoneinfo"
+      WriteAttributes:
+        - "address"
+        - "birthdate"
+        - !Sub "custom:${RoleAttribute}"
+        - "email"
+        - "family_name"
+        - "gender"
+        - "given_name"
+        - "locale"
+        - "middle_name"
+        - "name"
+        - "nickname"
+        - "phone_number"
+        - "picture"
+        - "preferred_username"
+        - "profile"
+        - "updated_at"
+        - "website"
+        - "zoneinfo"
+  CognitoUserPoolIdP:
+    Type: AWS::Cognito::UserPoolIdentityProvider 
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ProviderName: !Ref IdpName
+      ProviderType: OIDC
+      ProviderDetails:
+        client_id: !Ref "ClientId"
+        client_secret: !Ref "ClientSecret"
+        attributes_request_method: "GET"
+        oidc_issuer: !Ref "Issuer"
+        authorize_scopes: "email profile openid"
+      AttributeMapping:
+        custom:department: "department"
+        email: "email"
+        family_name: "family_name"
+        given_name: "given_name"
+        username: "sub"
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: 
+      UserPoolId: !Ref CognitoUserPool
+      Domain: !Ref CognitoDomain
+      
+#----------------------------Lambda Functions----------------------------
+  LambdaAuthorizer:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.7
+      CodeUri: ./LambdaCode
+      Description: 'Lambda function that serves as an authorizer with customm logic for API Gateway'
+      MemorySize: 256
+      Timeout: 5
+      Role: !GetAtt LambdaAuthorizerRole.Arn
+      Environment:
+        Variables:
+          COGNITO_REGION: !Ref AWS::Region
+          APP_CLIENT_ID: !Ref CognitoUserPoolClient
+          DDB_ROLES_TABLE: !Ref DdbResourceRolesRelationship
+          DDB_USAGE_TABLE: !Ref DdbUsageTable
+          DEFAULT_CALL_LIMIT: !Ref DefaultCallLimit
+          USERPOOL_ID: !Ref CognitoUserPool
+          ROLE_ATTRIBUTE: !Sub "custom:${RoleAttribute}"
+          USERNAME: !Ref Username
+      Layers:
+        - !Ref Dependencies
+#-----------------------------Lambda Layers------------------------------
+  Dependencies:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      Description: Lambda Layer for CognitoJwt and dynamodb-json package
+      ContentUri: ./layers/dependencies.zip
+      CompatibleRuntimes:
+        - python3.6
+        - python3.8
+        - python3.7
+
+#----------------------------DynamoDb Tables-----------------------------
+  DdbUsageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        -
+          AttributeName: "PrincipalId"
+          AttributeType: "S"
+      KeySchema: 
+        - 
+          AttributeName: "PrincipalId"
+          KeyType: "HASH"
+      TimeToLiveSpecification:
+        AttributeName: "TTL"
+        Enabled: true
+  DdbResourceRolesRelationship:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        -
+          AttributeName: "Resource"
+          AttributeType: "S"
+      KeySchema: 
+        - 
+          AttributeName: "Resource"
+          KeyType: "HASH"
+#--------------------------------Roles-----------------------------------
+  LambdaAuthorizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref LambdaCWPermissionsPolicy
+        - !Ref LambdaDdbPermissionsPolicy
+#-------------------------------Policies---------------------------------
+  LambdaCWPermissionsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              - 'logs:DescribeLogStreams'
+              - 'logs:GetLogEvents'
+              - 'logs:CreateLogGroup'
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+  LambdaDdbPermissionsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - 
+            Effect: Allow
+            Action:
+              - 'dynamodb:PutItem'
+              - 'dynamodb:UpdateItem'
+              - 'dynamodb:GetItem'
+            Resource: !GetAtt 'DdbUsageTable.Arn'
+          - 
+            Effect: Allow
+            Action:
+              - 'dynamodb:GetItem'
+            Resource: !GetAtt 'DdbResourceRolesRelationship.Arn'
