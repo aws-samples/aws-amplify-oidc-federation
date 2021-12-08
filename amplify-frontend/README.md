@@ -21,7 +21,7 @@ Within the code directory install all the necessary dependencies by running
 ```bash
 npm install
 ```
-Initilaize the project by running:
+Initialize the project by running:
 
 ```bash
 amplify init
